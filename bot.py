@@ -40,6 +40,7 @@ VT_API_KEYS = [
     os.getenv("VT_API_KEY_6"),
     os.getenv("VT_API_KEY_7"),
     os.getenv("VT_API_KEY_8"),
+    os.getenv("VT_API_KEY_9"),
 ]
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID"))  # 관리자 유저 ID
 SAFE_BROWSING_API_KEY = os.getenv("SAFE_BROWSING_API_KEY")  # Google Safe Browsing API Key
