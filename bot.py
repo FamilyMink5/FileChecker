@@ -32,17 +32,21 @@ load_dotenv()
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # Webhook URL for detailed messages
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-VT_API_KEYS = [
-    os.getenv("VT_API_KEY_1"),
-    os.getenv("VT_API_KEY_2"),
-    os.getenv("VT_API_KEY_3"),
-    os.getenv("VT_API_KEY_4"),
-    os.getenv("VT_API_KEY_5"),
-    os.getenv("VT_API_KEY_6"),
-    os.getenv("VT_API_KEY_7"),
-    os.getenv("VT_API_KEY_8"),
-    os.getenv("VT_API_KEY_9"),
-]
+
+# VT_API_KEYS 동적 로딩
+VT_API_KEYS = []
+i = 1
+while True:
+    api_key = os.getenv(f"VT_API_KEY_{i}")
+    if api_key:
+        VT_API_KEYS.append(api_key)
+        i += 1
+    else:
+        break
+
+if not VT_API_KEYS:
+    raise ValueError("No VirusTotal API keys found in environment variables")
+
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID"))  # 관리자 유저 ID
 SAFE_BROWSING_API_KEY = os.getenv("SAFE_BROWSING_API_KEY")  # Google Safe Browsing API Key
 
@@ -193,8 +197,8 @@ async def download_file(url, save_path, max_retries=3, timeout=30):
                         with save_path.open('wb') as f:
                             async for chunk in response.content.iter_chunked(chunk_size):
                                 f.write(chunk)
-                                if settings.network_limit:
-                                    await asyncio.sleep(len(chunk) / (chunk_size))  # 대역폭 제한 적용
+                                if settings.network_limit:  # None이면 대역폭 제한 없음
+                                    await asyncio.sleep(len(chunk) / (chunk_size))
 
                         logging.debug(f"File downloaded successfully: {save_path}")
                         return save_path
@@ -556,19 +560,24 @@ async def clear_temp(interaction: discord.Interaction):
         logging.error(f"Error clearing temp folder: {e}")
 
 @bot.tree.command(name="set", description="봇 설정을 변경합니다")
-@app_commands.describe(network="네트워크 대역폭 제한 (Mbps)")
+@app_commands.describe(network="네트워크 대역폭 제한 (Mbps). 0은 무제한")
 async def set_network(interaction: discord.Interaction, network: int):
     if not is_admin(interaction):
         await interaction.response.send_message("이 명령어는 관리자만 사용할 수 있습니다.", ephemeral=True)
         return
 
-    if network <= 0:
-        await interaction.response.send_message("❌ 네트워크 대역폭은 0보다 커야 합니다.", ephemeral=True)
+    if network < 0:
+        await interaction.response.send_message("❌ 네트워크 대역폭은 0 이상이어야 합니다.", ephemeral=True)
         return
 
-    settings.network_limit = network
-    await interaction.response.send_message(f"✅ 네트워크 대역폭이 {network}Mbps로 제한되었습니다.", ephemeral=True)
-    logging.info(f"Network bandwidth limit set to {network}Mbps")
+    settings.network_limit = None if network == 0 else network
+    status_msg = "무제한" if network == 0 else f"{network}Mbps"
+    
+    await interaction.response.send_message(
+        f"✅ 네트워크 대역폭이 {status_msg}으로 설정되었습니다.", 
+        ephemeral=True
+    )
+    logging.info(f"Network bandwidth limit set to {status_msg}")
 
 @bot.tree.command(name="toggle", description="봇의 기능을 켜거나 끕니다")
 @app_commands.describe(feature="토글할 기능 선택")
