@@ -54,6 +54,7 @@ SAFE_BROWSING_API_KEY = os.getenv("SAFE_BROWSING_API_KEY")  # Google Safe Browsi
 intents = discord.Intents.default()
 intents.messages = True
 intents.message_content = True
+intents.guilds = True  # 슬래시 커맨드에 필요
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # 화이트리스트된 파일 확장자 (해킹에 자주 쓰이는 확장자 포함)
