@@ -1,3 +1,4 @@
 .env
 bot_debug.log
 server_settings.json
+__pycache__/

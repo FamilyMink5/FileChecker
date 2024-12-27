@@ -1,38 +1,23 @@
-import asyncio
+import json
 import os
-import random
 import re
 import unicodedata
 from datetime import datetime, timedelta
-from pathlib import Path
 from urllib.parse import urlparse
-import json
-
+from dotenv import load_dotenv
+from pathlib import Path
 import aiohttp
+import asyncio
 import discord
 import vt
-from discord.ext import commands
-from discord import app_commands
-from dotenv import load_dotenv
-
-import logging
-
-# 로깅 설정
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s %(levelname)s:%(message)s',
-    handlers=[
-        logging.FileHandler("bot_debug.log", encoding='utf-8'),
-        logging.StreamHandler()
-    ]
-)
+from main import logging, bot
 
 # .env 파일 로드
 load_dotenv()
 
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # Webhook URL for detailed messages
-
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID"))  # 관리자 유저 ID
+SAFE_BROWSING_API_KEY = os.getenv("SAFE_BROWSING_API_KEY")  # Google Safe Browsing API Key
 
 # VT_API_KEYS 동적 로딩
 VT_API_KEYS = []
@@ -48,14 +33,11 @@ while True:
 if not VT_API_KEYS:
     raise ValueError("No VirusTotal API keys found in environment variables")
 
-ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID"))  # 관리자 유저 ID
-SAFE_BROWSING_API_KEY = os.getenv("SAFE_BROWSING_API_KEY")  # Google Safe Browsing API Key
+# 서버별 설정을 저장하는 전역 변수
+SETTINGS_FILE = "server_settings.json"
 
-intents = discord.Intents.default()
-intents.messages = True
-intents.message_content = True
-intents.guilds = True  # 슬래시 커맨드에 필요
-bot = commands.Bot(command_prefix="!", intents=intents)
+# Discord 업로드 제한 설정 (바이트 단위)
+DISCORD_FILE_SIZE_LIMIT = 8 * 1024 * 1024  # 8MB, 필요에 따라 크기를 조정하세요.
 
 # 화이트리스트된 파일 확장자 (해킹에 자주 쓰이는 확장자 포함)
 ALLOWED_EXTENSIONS = {
@@ -80,12 +62,6 @@ api_key_lock = asyncio.Lock()
 # Temp 디렉터리 경로 설정
 TEMP_DIR = Path("D:/Temp")
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
-
-# Discord 업로드 제한 설정 (바이트 단위)
-DISCORD_FILE_SIZE_LIMIT = 8 * 1024 * 1024  # 8MB, 필요에 따라 크기를 조정하세요.
-
-# 서버별 설정을 저장하는 전역 변수
-SETTINGS_FILE = "server_settings.json"
 
 # 설정 저장을 위한 클래스
 class BotSettings:
@@ -554,191 +530,3 @@ async def handle_scan_results(message, filename, file_size, stats, status_messag
     except Exception as e:
         logging.exception(f"Error while handling scan results: {e}")
         await message.channel.send(f"파일 `{filename}` 처리 중 오류가 발생했습니다: {str(e)}")
-
-@bot.tree.command(name="toggle", description="봇의 기능을 켜거나 끕니다")
-@app_commands.describe(feature="토글할 기능 선택")
-@app_commands.choices(feature=[
-    app_commands.Choice(name="임시 파일 저장", value="save_temp"),
-    app_commands.Choice(name="파일 검사", value="file_check"),
-    app_commands.Choice(name="링크 검사", value="link_check")
-])
-async def toggle_feature(interaction: discord.Interaction, feature: app_commands.Choice[str]):
-    if not is_admin(interaction):
-        await interaction.response.send_message("이 명령어는 관리자만 사용할 수 있습니다.", ephemeral=True)
-        return
-
-    guild_id = interaction.guild.id  # 서버 ID 가져오기
-    settings = get_server_settings(guild_id)  # 해당 서버의 설정 가져오기
-
-    feature_name = feature.value  # 선택된 기능 이름 가져오기
-    current_value = getattr(settings, feature_name)
-    new_value = not current_value
-    setattr(settings, feature_name, new_value)
-
-    # 설정 저장
-    save_server_settings()
-
-    status = "활성화" if new_value else "비활성화"
-    feature_names = {
-        "save_temp": "임시 파일 저장",
-        "file_check": "파일 검사",
-        "link_check": "링크 검사"
-    }
-    
-    await interaction.response.send_message(
-        f"✅ {feature_names[feature_name]}이(가) {status}되었습니다.", 
-        ephemeral=True
-    )
-    logging.info(f"Feature {feature_name} toggled to {new_value} for server {guild_id}")
-
-# 슬래시 커맨드 그룹 생성
-@bot.tree.command(name="clear", description="Temp 폴더를 초기화합니다")
-async def clear_temp(interaction: discord.Interaction):
-    if not is_admin(interaction):
-        await interaction.response.send_message("이 명령어는 관리자만 사용할 수 있습니다.", ephemeral=True)
-        return
-
-    try:
-        # Temp 폴더 내용 삭제
-        for item in TEMP_DIR.iterdir():
-            if item.is_file():
-                item.unlink()
-            elif item.is_dir():
-                shutil.rmtree(item)
-        
-        await interaction.response.send_message("✅ Temp 폴더가 초기화되었습니다.", ephemeral=True)
-        logging.info("Temp folder cleared successfully")
-    except Exception as e:
-        await interaction.response.send_message(f"❌ Temp 폴더 초기화 중 오류가 발생했습니다: {str(e)}", ephemeral=True)
-        logging.error(f"Error clearing temp folder: {e}")
-
-@bot.tree.command(name="set", description="봇 설정을 변경합니다")
-@app_commands.describe(network="네트워크 대역폭 제한 (Mbps). 0은 무제한")
-async def set_network(interaction: discord.Interaction, network: int):
-    if not is_admin(interaction):
-        await interaction.response.send_message("이 명령어는 관리자만 사용할 수 있습니다.", ephemeral=True)
-        return
-
-    if network < 0:
-        await interaction.response.send_message("❌ 네트워크 대역폭은 0 이상이어야 합니다.", ephemeral=True)
-        return
-
-    settings.network_limit = None if network == 0 else network
-    status_msg = "무제한" if network == 0 else f"{network}Mbps"
-    
-    await interaction.response.send_message(
-        f"✅ 네트워크 대역폭이 {status_msg}으로 설정되었습니다.", 
-        ephemeral=True
-    )
-    logging.info(f"Network bandwidth limit set to {status_msg}")
-
-@bot.event
-async def on_message(message):
-    if message.author.bot:
-        return
-
-    # 메시지에서 링크를 추출
-    urls = extract_urls(message.content)
-
-     # 링크 검사가 활성화된 경우에만 수행
-    if settings.link_check:
-        urls = extract_urls(message.content)
-        if urls:
-            for url in urls:
-                safety = await check_url_safety(url)
-                if safety == "malicious":
-                    await message.add_reaction("❗️")
-                    await message.delete()
-                    await message.channel.send(f"링크 `{url}`은 안전하지 않으므로 삭제되었습니다.")
-                elif safety == "safe":
-                    await message.add_reaction("✅")
-                    await process_url(url, message)
-                else:
-                    await message.add_reaction("❓")
-
-    if settings.file_check and message.attachments:
-        # 첨부 파일 처리
-        if message.attachments:
-            for attachment in message.attachments:
-                filename = attachment.filename
-                if is_allowed_file(filename):
-                    logging.info(f"Received file for scanning: {filename}")
-                    
-                    # 새로운 저장 경로 생성
-                    guild_name = sanitize_filename(message.guild.name if message.guild else "DM")
-                    channel_name = sanitize_filename(message.channel.name if isinstance(message.channel, discord.TextChannel) else "DM")
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
-                    temp_dir = TEMP_DIR / guild_name / channel_name / timestamp
-                    temp_dir.mkdir(parents=True, exist_ok=True)
-                    
-                    temp_path = temp_dir / filename
-
-                    try:
-                        logging.debug(f"Saving attachment: {attachment.url}")
-                        await attachment.save(temp_path)
-                        
-                        if not temp_path.exists():
-                            error_msg = f"File was not saved: {temp_path}"
-                            logging.error(error_msg)
-                            raise FileNotFoundError(error_msg)
-
-                        file_size = temp_path.stat().st_size
-                        logging.debug(f"File size: {file_size} bytes")
-
-                        await message.delete()
-                        logging.debug(f"Deleted user message: {message.id}")
-
-                        embed = discord.Embed(
-                            title="파일 검사 진행 중",
-                            description=f"파일 `{filename}` 검사 준비 중입니다...\n보낸 유저: {message.author}\n파일 사이즈: {file_size / (1024 * 1024):.2f}MB",
-                            color=discord.Color.blue()
-                        )
-                        status_message = await message.channel.send(content=message.author.mention, embed=embed)
-
-                        api_key = await get_available_api_key()
-                        async with vt.Client(api_key) as client:
-                            analysis = await scan_file_with_vt(client, temp_path, embed, status_message, message, file_size)
-
-                            if analysis.status != "completed":
-                                timeout_embed = discord.Embed(
-                                    title="파일 검사 시간 초과",
-                                    description=f"⏰ 파일 `{filename}`의 검사 시간이 초과되었습니다.",
-                                    color=discord.Color.orange()
-                                )
-                                await message.channel.send(content=message.author.mention, embed=timeout_embed)
-                                return
-
-                            stats = analysis.stats
-                            await handle_scan_results(message, filename, file_size, stats, status_message, temp_path)
-
-                    except TimeoutError:
-                        logging.warning(f"Analysis timed out for file: {filename}")
-                    except Exception as e:
-                        error_msg = f"파일 `{filename}` 검사 중 오류가 발생했습니다: {str(e)}"
-                        logging.exception(f"Exception occurred: {str(e)}")
-                        await message.channel.send(error_msg)
-
-                else:
-                    logging.debug(f"Unsupported file type received: {filename}")
-                    await message.channel.send(f"파일 `{filename}`은(는) 지원되지 않는 파일 형식입니다.")
-
-                pass
-
-    await bot.process_commands(message)
-
-@bot.event
-async def on_ready():
-    load_server_settings()  # 설정 로드
-    try:
-        synced = await bot.tree.sync()
-        logging.info(f"Synced {len(synced)} command(s)")
-    except Exception as e:
-        logging.error(f"Failed to sync commands: {e}")
-    logging.info(f"Logged in as {bot.user}!")
-
-@bot.event
-async def on_disconnect():
-    save_server_settings()  # 설정 저장
-    logging.info("Bot disconnected. Server settings saved.")
-
-bot.run(DISCORD_TOKEN)
