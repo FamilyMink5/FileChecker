@@ -45,14 +45,15 @@ ALLOWED_EXTENSIONS = {
     ".js", ".scr", ".bat", ".cmd", ".msi", ".vbs",
     ".jar", ".dll", ".bin", ".apk", ".iso", ".img", ".dmg",
     ".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx",
-    ".txt", ".rtf", ".odt", ".ods", ".odp",
+    ".txt", ".rtf", ".odt", ".ods", ".odp", ".csv", ".json",
     ".php", ".html", ".htm", ".css", ".py", ".sh", ".rb", ".pl",
     ".c", ".cpp", ".h", ".hpp", ".java", ".class", ".cs", ".vb", ".ps1",
-    ".asp", ".aspx", ".jsp", ".cgi", ".swift",
+    ".asp", ".aspx", ".jsp", ".cgi", ".swift", ".kt", ".ts"
     ".go", ".scala", ".lua", ".m", ".md", ".json", ".xml", ".yaml", ".yml",
     ".sql", ".db", ".dbf", ".bak", ".log", ".cfg", ".conf", ".ini",
     ".sys", ".drv", ".ocx", ".psd", ".tmp", ".xlt", ".xltx", ".mde",
-    ".svg", ".ai", ".eps", ".safetensors"
+    ".svg", ".ai", ".eps", ".safetensors", ".mov", ".mp4", ".avi", ".mkv",
+    ".mp3", ".wav", ".flac", ".ogg", ".wma", ".aac", ".m4a", ".flv",
 }
 
 REQUEST_LIMIT_PER_MIN = 4
@@ -504,8 +505,17 @@ async def handle_scan_results(message, filename, file_size, stats, status_messag
         if malicious_count + suspicious_count > 0:
             result_embed.description = f"⚠️ 이 파일은 잠재적으로 위험할 수 있습니다!"
             # 관리자 맨션
-            admin_user = await bot.fetch_user(ADMIN_USER_ID)
-            content = f"{message.author.mention} {admin_user.mention}"
+            try:
+                admin_user = await bot.fetch_user(ADMIN_USER_ID)
+            except AttributeError as e:
+                logging.error(f"Error fetching admin user: {e}")
+                admin_user = None  # Fallback: handle gracefully
+
+            if admin_user is None:
+                content = f"{message.author.mention} (Admin user could not be fetched)"
+            else:
+                content = f"{message.author.mention} {admin_user.mention}"
+
             await send_detailed_message_via_webhook(message, filename, file_size, stats)
             await status_message.reply(content=content, embed=result_embed)
             logging.debug("Scan result sent with admin mention.")
