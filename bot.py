@@ -503,6 +503,13 @@ async def handle_scan_results(message, filename, file_size, stats, status_messag
         logging.exception(f"Error while handling scan results: {e}")
         await message.channel.send(f"파일 `{filename}` 처리 중 오류가 발생했습니다: {str(e)}")
 
+@bot.tree.command(name="toggle", description="봇의 기능을 켜거나 끕니다")
+@app_commands.describe(feature="토글할 기능 선택")
+@app_commands.choices(feature=[
+    app_commands.Choice(name="임시 파일 저장", value="save_temp"),
+    app_commands.Choice(name="파일 검사", value="file_check"),
+    app_commands.Choice(name="링크 검사", value="link_check")
+])
 async def toggle_feature(interaction: discord.Interaction, feature: app_commands.Choice[str]):
     if not is_admin(interaction):
         await interaction.response.send_message("이 명령어는 관리자만 사용할 수 있습니다.", ephemeral=True)
@@ -578,14 +585,6 @@ async def set_network(interaction: discord.Interaction, network: int):
         ephemeral=True
     )
     logging.info(f"Network bandwidth limit set to {status_msg}")
-
-@bot.tree.command(name="toggle", description="봇의 기능을 켜거나 끕니다")
-@app_commands.describe(feature="토글할 기능 선택")
-@app_commands.choices(feature=[
-    app_commands.Choice(name="save_temp", value="save_temp"),
-    app_commands.Choice(name="file_check", value="file_check"),
-    app_commands.Choice(name="link_check", value="link_check")
-])
 
 @bot.event
 async def on_message(message):
