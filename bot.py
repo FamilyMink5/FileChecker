@@ -6,6 +6,7 @@ import unicodedata
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
+import json
 
 import aiohttp
 import discord
@@ -82,19 +83,69 @@ TEMP_DIR.mkdir(parents=True, exist_ok=True)
 # Discord 업로드 제한 설정 (바이트 단위)
 DISCORD_FILE_SIZE_LIMIT = 8 * 1024 * 1024  # 8MB, 필요에 따라 크기를 조정하세요.
 
+# 서버별 설정을 저장하는 전역 변수
+SETTINGS_FILE = "server_settings.json"
+
 # 설정 저장을 위한 클래스
 class BotSettings:
-    def __init__(self):
-        self.save_temp = True  # Temp 폴더 저장 여부
-        self.file_check = True  # 파일 검사 활성화 여부
-        self.link_check = True  # 링크 검사 활성화 여부
-        self.network_limit = None  # 네트워크 대역폭 제한 (Mbps)
+    def __init__(self, save_temp=True, file_check=True, link_check=True, network_limit=None):
+        self.save_temp = save_temp  # Temp 폴더 저장 여부
+        self.file_check = file_check  # 파일 검사 활성화 여부
+        self.link_check = link_check  # 링크 검사 활성화 여부
+        self.network_limit = network_limit  # 네트워크 대역폭 제한 (Mbps)
+
+    def __repr__(self):
+        return f"BotSettings(save_temp={self.save_temp}, file_check={self.file_check}, link_check={self.link_check}, network_limit={self.network_limit})"
 
 settings = BotSettings()
 
 # 관리자 권한 확인 함수
 def is_admin(interaction: discord.Interaction) -> bool:
     return interaction.user.id == ADMIN_USER_ID
+
+def load_server_settings():
+    """
+    JSON 파일에서 서버별 설정을 로드합니다.
+    """
+    global server_settings
+    try:
+        if os.path.exists(SETTINGS_FILE):
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                # JSON 파일 읽기
+                data = json.load(f)
+                # 서버별 설정 복원
+                server_settings = {
+                    int(guild_id): BotSettings(**settings)  # 딕셔너리를 객체로 변환
+                    for guild_id, settings in data.items()
+                }
+            logging.info("✅ Server settings loaded from file.")
+        else:
+            logging.info("⚠️ No settings file found. Using default settings.")
+    except Exception as e:
+        logging.error(f"❌ Failed to load server settings: {e}")
+        server_settings = {}
+
+def save_server_settings():
+    """
+    서버별 설정을 JSON 파일로 저장합니다.
+    """
+    try:
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            # 서버별 설정을 딕셔너리로 변환
+            data = {
+                str(guild_id): vars(settings)  # 객체를 딕셔너리로 변환
+                for guild_id, settings in server_settings.items()
+            }
+            json.dump(data, f, ensure_ascii=False, indent=4)
+        logging.info("✅ Server settings saved to file.")
+    except Exception as e:
+        logging.error(f"❌ Failed to save server settings: {e}")
+
+# 서버별 설정을 로드하거나 기본값 생성
+def get_server_settings(guild_id):
+    if guild_id not in server_settings:
+        server_settings[guild_id] = BotSettings()  # 새로 생성
+    return server_settings[guild_id]
 
 def sanitize_filename(filename):
     """
@@ -515,22 +566,16 @@ async def toggle_feature(interaction: discord.Interaction, feature: app_commands
         await interaction.response.send_message("이 명령어는 관리자만 사용할 수 있습니다.", ephemeral=True)
         return
 
-    feature_name = feature.value
+    guild_id = interaction.guild.id  # 서버 ID 가져오기
+    settings = get_server_settings(guild_id)  # 해당 서버의 설정 가져오기
+
+    feature_name = feature.value  # 선택된 기능 이름 가져오기
     current_value = getattr(settings, feature_name)
     new_value = not current_value
     setattr(settings, feature_name, new_value)
 
-    # save_temp가 꺼지면 Temp 폴더 초기화
-    if feature_name == "save_temp" and not new_value:
-        try:
-            for item in TEMP_DIR.iterdir():
-                if item.is_file():
-                    item.unlink()
-                elif item.is_dir():
-                    shutil.rmtree(item)
-            logging.info("Temp folder cleared after disabling save_temp")
-        except Exception as e:
-            logging.error(f"Error clearing temp folder: {e}")
+    # 설정 저장
+    save_server_settings()
 
     status = "활성화" if new_value else "비활성화"
     feature_names = {
@@ -543,7 +588,7 @@ async def toggle_feature(interaction: discord.Interaction, feature: app_commands
         f"✅ {feature_names[feature_name]}이(가) {status}되었습니다.", 
         ephemeral=True
     )
-    logging.info(f"Feature {feature_name} toggled to {new_value}")
+    logging.info(f"Feature {feature_name} toggled to {new_value} for server {guild_id}")
 
 # 슬래시 커맨드 그룹 생성
 @bot.tree.command(name="clear", description="Temp 폴더를 초기화합니다")
@@ -682,11 +727,17 @@ async def on_message(message):
 
 @bot.event
 async def on_ready():
+    load_server_settings()  # 설정 로드
     try:
         synced = await bot.tree.sync()
         logging.info(f"Synced {len(synced)} command(s)")
     except Exception as e:
         logging.error(f"Failed to sync commands: {e}")
     logging.info(f"Logged in as {bot.user}!")
+
+@bot.event
+async def on_disconnect():
+    save_server_settings()  # 설정 저장
+    logging.info("Bot disconnected. Server settings saved.")
 
 bot.run(DISCORD_TOKEN)
