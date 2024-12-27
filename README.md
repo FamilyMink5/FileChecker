@@ -109,8 +109,8 @@ Required Environment Variables | 필수 환경 변수:
 - `DISCORD_TOKEN`: Discord bot token | 디스코드 봇 토큰
 - `VT_API_KEY_1` to `VT_API_KEY_8`: VirusTotal API keys | 바이러스토탈 API 키키
 - `ADMIN_USER_ID`: Discord admin user ID | 디스코드 어드민의 유저 ID
-- `WEBHOOK_URL`: Discord webhook URL for detailed logs | 상세한 정보를 위한 채널의 웹후크크
-- `SAFE_BROWSING_API_KEY`: Google Safe Browsing API key | 구글 세이프 브라우징 API 키키
+- `WEBHOOK_URL`: Discord webhook URL for detailed logs | 상세한 정보를 위한 채널의 웹후크
+- `SAFE_BROWSING_API_KEY`: Google Safe Browsing API key | 구글 세이프 브라우징 API 키
 
 ### ⚠️ Limitations | 제한 사항
 - Maximum file size: 8MB (Discord limit)
