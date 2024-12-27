@@ -11,6 +11,7 @@ import aiohttp
 import discord
 import vt
 from discord.ext import commands
+from discord import app_commands
 from dotenv import load_dotenv
 
 import logging
@@ -77,6 +78,20 @@ TEMP_DIR.mkdir(parents=True, exist_ok=True)
 # Discord 업로드 제한 설정 (바이트 단위)
 DISCORD_FILE_SIZE_LIMIT = 8 * 1024 * 1024  # 8MB, 필요에 따라 크기를 조정하세요.
 
+# 설정 저장을 위한 클래스
+class BotSettings:
+    def __init__(self):
+        self.save_temp = True  # Temp 폴더 저장 여부
+        self.file_check = True  # 파일 검사 활성화 여부
+        self.link_check = True  # 링크 검사 활성화 여부
+        self.network_limit = None  # 네트워크 대역폭 제한 (Mbps)
+
+settings = BotSettings()
+
+# 관리자 권한 확인 함수
+def is_admin(interaction: discord.Interaction) -> bool:
+    return interaction.user.id == ADMIN_USER_ID
+
 def sanitize_filename(filename):
     """
     파일명 내 위험/불가 문자 제거 및 길이 제한, 유니코드 정규화 등
@@ -134,11 +149,13 @@ def extract_urls(text):
     logging.debug(f"Extracted URLs: {urls}")
     return urls
 
+# 기존 다운로드 함수 수정
 async def download_file(url, save_path, max_retries=3, timeout=30):
-    """
-    Downloads a file from a given URL and saves it to the specified path.
-    Includes retry and timeout mechanisms.
-    """
+    if settings.network_limit:
+        chunk_size = int((settings.network_limit * 1024 * 1024) / 8)  # Mbps를 bytes/s로 변환
+    else:
+        chunk_size = 8192  # 기본 청크 크기
+
     attempt = 0
     while attempt < max_retries:
         try:
@@ -148,7 +165,6 @@ async def download_file(url, save_path, max_retries=3, timeout=30):
                     logging.debug(f"Received response with status code: {response.status}")
                     
                     if response.status == 200:
-                        # Extract filename from Content-Disposition header if available
                         filename = save_path.name
                         if 'Content-Disposition' in response.headers:
                             cd = response.headers.get('Content-Disposition')
@@ -157,42 +173,40 @@ async def download_file(url, save_path, max_retries=3, timeout=30):
                                 filename = fname_match[0]
                                 filename = sanitize_filename(filename)
                         
-                        # 새로운 저장 경로 생성
-                        guild_name = sanitize_filename(save_path.parent.parent.stem)
-                        channel_name = sanitize_filename(save_path.parent.stem)
-                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
-                        temp_dir = TEMP_DIR / guild_name / channel_name / timestamp
-                        temp_dir.mkdir(parents=True, exist_ok=True)
+                        if not settings.save_temp:
+                            # 임시 파일 생성
+                            temp_file = Path(os.path.join(os.getcwd(), "temp_download"))
+                            save_path = temp_file
+                        else:
+                            guild_name = sanitize_filename(save_path.parent.parent.stem)
+                            channel_name = sanitize_filename(save_path.parent.stem)
+                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+                            temp_dir = TEMP_DIR / guild_name / channel_name / timestamp
+                            temp_dir.mkdir(parents=True, exist_ok=True)
+                            save_path = temp_dir / filename
 
-                        save_path = temp_dir / filename
-
-                        # Check if the file extension is allowed
                         if not is_allowed_file(filename):
                             logging.debug(f"Downloaded file '{filename}' is not an allowed type.")
                             return None
 
-                        # Read and save the file content
-                        content = await response.read()
-                        save_path.write_bytes(content)
+                        # 청크 단위로 파일 다운로드
+                        with save_path.open('wb') as f:
+                            async for chunk in response.content.iter_chunked(chunk_size):
+                                f.write(chunk)
+                                if settings.network_limit:
+                                    await asyncio.sleep(len(chunk) / (chunk_size))  # 대역폭 제한 적용
+
                         logging.debug(f"File downloaded successfully: {save_path}")
                         return save_path
                     else:
                         logging.error(f"Failed to download file: Status code {response.status}")
                         return None
 
-        except aiohttp.ClientPayloadError as e:
-            logging.error(f"Payload error while downloading file: {e}")
-        except aiohttp.ClientConnectionError as e:
-            logging.error(f"Connection error while downloading file: {e}")
-        except asyncio.TimeoutError:
-            logging.error(f"Timeout error while downloading file from {url}")
         except Exception as e:
-            logging.exception(f"Unexpected error while downloading file: {e}")
-
-        attempt += 1
-        if attempt < max_retries:
-            logging.debug("Retrying file download...")
-            await asyncio.sleep(2)  # Wait before retrying
+            logging.exception(f"Error downloading file: {e}")
+            attempt += 1
+            if attempt < max_retries:
+                await asyncio.sleep(2)
 
     logging.error(f"Failed to download file after {max_retries} attempts: {url}")
     return None
@@ -270,10 +284,6 @@ async def process_url(url, message):
     except Exception as e:
         logging.exception(f"URL `{url}` 처리 중 오류 발생: {e}")
         await message.channel.send(f"링크 `{url}` 처리 중 오류가 발생했습니다: {str(e)}")
-
-@bot.event
-async def on_ready():
-    logging.info(f"Logged in as {bot.user}!")
 
 async def scan_file_with_vt(client, file_path, embed, status_message, message, file_size):
     """
@@ -489,6 +499,85 @@ async def handle_scan_results(message, filename, file_size, stats, status_messag
         logging.exception(f"Error while handling scan results: {e}")
         await message.channel.send(f"파일 `{filename}` 처리 중 오류가 발생했습니다: {str(e)}")
 
+async def toggle_feature(interaction: discord.Interaction, feature: app_commands.Choice[str]):
+    if not is_admin(interaction):
+        await interaction.response.send_message("이 명령어는 관리자만 사용할 수 있습니다.", ephemeral=True)
+        return
+
+    feature_name = feature.value
+    current_value = getattr(settings, feature_name)
+    new_value = not current_value
+    setattr(settings, feature_name, new_value)
+
+    # save_temp가 꺼지면 Temp 폴더 초기화
+    if feature_name == "save_temp" and not new_value:
+        try:
+            for item in TEMP_DIR.iterdir():
+                if item.is_file():
+                    item.unlink()
+                elif item.is_dir():
+                    shutil.rmtree(item)
+            logging.info("Temp folder cleared after disabling save_temp")
+        except Exception as e:
+            logging.error(f"Error clearing temp folder: {e}")
+
+    status = "활성화" if new_value else "비활성화"
+    feature_names = {
+        "save_temp": "임시 파일 저장",
+        "file_check": "파일 검사",
+        "link_check": "링크 검사"
+    }
+    
+    await interaction.response.send_message(
+        f"✅ {feature_names[feature_name]}이(가) {status}되었습니다.", 
+        ephemeral=True
+    )
+    logging.info(f"Feature {feature_name} toggled to {new_value}")
+
+# 슬래시 커맨드 그룹 생성
+@bot.tree.command(name="clear", description="Temp 폴더를 초기화합니다")
+async def clear_temp(interaction: discord.Interaction):
+    if not is_admin(interaction):
+        await interaction.response.send_message("이 명령어는 관리자만 사용할 수 있습니다.", ephemeral=True)
+        return
+
+    try:
+        # Temp 폴더 내용 삭제
+        for item in TEMP_DIR.iterdir():
+            if item.is_file():
+                item.unlink()
+            elif item.is_dir():
+                shutil.rmtree(item)
+        
+        await interaction.response.send_message("✅ Temp 폴더가 초기화되었습니다.", ephemeral=True)
+        logging.info("Temp folder cleared successfully")
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Temp 폴더 초기화 중 오류가 발생했습니다: {str(e)}", ephemeral=True)
+        logging.error(f"Error clearing temp folder: {e}")
+
+@bot.tree.command(name="set", description="봇 설정을 변경합니다")
+@app_commands.describe(network="네트워크 대역폭 제한 (Mbps)")
+async def set_network(interaction: discord.Interaction, network: int):
+    if not is_admin(interaction):
+        await interaction.response.send_message("이 명령어는 관리자만 사용할 수 있습니다.", ephemeral=True)
+        return
+
+    if network <= 0:
+        await interaction.response.send_message("❌ 네트워크 대역폭은 0보다 커야 합니다.", ephemeral=True)
+        return
+
+    settings.network_limit = network
+    await interaction.response.send_message(f"✅ 네트워크 대역폭이 {network}Mbps로 제한되었습니다.", ephemeral=True)
+    logging.info(f"Network bandwidth limit set to {network}Mbps")
+
+@bot.tree.command(name="toggle", description="봇의 기능을 켜거나 끕니다")
+@app_commands.describe(feature="토글할 기능 선택")
+@app_commands.choices(feature=[
+    app_commands.Choice(name="save_temp", value="save_temp"),
+    app_commands.Choice(name="file_check", value="file_check"),
+    app_commands.Choice(name="link_check", value="link_check")
+])
+
 @bot.event
 async def on_message(message):
     if message.author.bot:
@@ -497,85 +586,99 @@ async def on_message(message):
     # 메시지에서 링크를 추출
     urls = extract_urls(message.content)
 
-    # 링크 검사 및 반응
-    if urls:
-        for url in urls:
-            safety = await check_url_safety(url)
-            if safety == "malicious":
-                await message.add_reaction("❗️")
-                await message.delete()
-                await message.channel.send(f"링크 `{url}`은 안전하지 않으므로 삭제되었습니다.")
-            elif safety == "safe":
-                await message.add_reaction("✅")
-                await process_url(url, message)
-            else:
-                await message.add_reaction("❓")
-
-    # 첨부 파일 처리
-    if message.attachments:
-        for attachment in message.attachments:
-            filename = attachment.filename
-            if is_allowed_file(filename):
-                logging.info(f"Received file for scanning: {filename}")
-                
-                # 새로운 저장 경로 생성
-                guild_name = sanitize_filename(message.guild.name if message.guild else "DM")
-                channel_name = sanitize_filename(message.channel.name if isinstance(message.channel, discord.TextChannel) else "DM")
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
-                temp_dir = TEMP_DIR / guild_name / channel_name / timestamp
-                temp_dir.mkdir(parents=True, exist_ok=True)
-                
-                temp_path = temp_dir / filename
-
-                try:
-                    logging.debug(f"Saving attachment: {attachment.url}")
-                    await attachment.save(temp_path)
-                    
-                    if not temp_path.exists():
-                        error_msg = f"File was not saved: {temp_path}"
-                        logging.error(error_msg)
-                        raise FileNotFoundError(error_msg)
-
-                    file_size = temp_path.stat().st_size
-                    logging.debug(f"File size: {file_size} bytes")
-
+     # 링크 검사가 활성화된 경우에만 수행
+    if settings.link_check:
+        urls = extract_urls(message.content)
+        if urls:
+            for url in urls:
+                safety = await check_url_safety(url)
+                if safety == "malicious":
+                    await message.add_reaction("❗️")
                     await message.delete()
-                    logging.debug(f"Deleted user message: {message.id}")
+                    await message.channel.send(f"링크 `{url}`은 안전하지 않으므로 삭제되었습니다.")
+                elif safety == "safe":
+                    await message.add_reaction("✅")
+                    await process_url(url, message)
+                else:
+                    await message.add_reaction("❓")
 
-                    embed = discord.Embed(
-                        title="파일 검사 진행 중",
-                        description=f"파일 `{filename}` 검사 준비 중입니다...\n보낸 유저: {message.author}\n파일 사이즈: {file_size / (1024 * 1024):.2f}MB",
-                        color=discord.Color.blue()
-                    )
-                    status_message = await message.channel.send(content=message.author.mention, embed=embed)
+    if settings.file_check and message.attachments:
+        # 첨부 파일 처리
+        if message.attachments:
+            for attachment in message.attachments:
+                filename = attachment.filename
+                if is_allowed_file(filename):
+                    logging.info(f"Received file for scanning: {filename}")
+                    
+                    # 새로운 저장 경로 생성
+                    guild_name = sanitize_filename(message.guild.name if message.guild else "DM")
+                    channel_name = sanitize_filename(message.channel.name if isinstance(message.channel, discord.TextChannel) else "DM")
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+                    temp_dir = TEMP_DIR / guild_name / channel_name / timestamp
+                    temp_dir.mkdir(parents=True, exist_ok=True)
+                    
+                    temp_path = temp_dir / filename
 
-                    api_key = await get_available_api_key()
-                    async with vt.Client(api_key) as client:
-                        analysis = await scan_file_with_vt(client, temp_path, embed, status_message, message, file_size)
+                    try:
+                        logging.debug(f"Saving attachment: {attachment.url}")
+                        await attachment.save(temp_path)
+                        
+                        if not temp_path.exists():
+                            error_msg = f"File was not saved: {temp_path}"
+                            logging.error(error_msg)
+                            raise FileNotFoundError(error_msg)
 
-                        if analysis.status != "completed":
-                            timeout_embed = discord.Embed(
-                                title="파일 검사 시간 초과",
-                                description=f"⏰ 파일 `{filename}`의 검사 시간이 초과되었습니다.",
-                                color=discord.Color.orange()
-                            )
-                            await message.channel.send(content=message.author.mention, embed=timeout_embed)
-                            return
+                        file_size = temp_path.stat().st_size
+                        logging.debug(f"File size: {file_size} bytes")
 
-                        stats = analysis.stats
-                        await handle_scan_results(message, filename, file_size, stats, status_message, temp_path)
+                        await message.delete()
+                        logging.debug(f"Deleted user message: {message.id}")
 
-                except TimeoutError:
-                    logging.warning(f"Analysis timed out for file: {filename}")
-                except Exception as e:
-                    error_msg = f"파일 `{filename}` 검사 중 오류가 발생했습니다: {str(e)}"
-                    logging.exception(f"Exception occurred: {str(e)}")
-                    await message.channel.send(error_msg)
+                        embed = discord.Embed(
+                            title="파일 검사 진행 중",
+                            description=f"파일 `{filename}` 검사 준비 중입니다...\n보낸 유저: {message.author}\n파일 사이즈: {file_size / (1024 * 1024):.2f}MB",
+                            color=discord.Color.blue()
+                        )
+                        status_message = await message.channel.send(content=message.author.mention, embed=embed)
 
-            else:
-                logging.debug(f"Unsupported file type received: {filename}")
-                await message.channel.send(f"파일 `{filename}`은(는) 지원되지 않는 파일 형식입니다.")
+                        api_key = await get_available_api_key()
+                        async with vt.Client(api_key) as client:
+                            analysis = await scan_file_with_vt(client, temp_path, embed, status_message, message, file_size)
+
+                            if analysis.status != "completed":
+                                timeout_embed = discord.Embed(
+                                    title="파일 검사 시간 초과",
+                                    description=f"⏰ 파일 `{filename}`의 검사 시간이 초과되었습니다.",
+                                    color=discord.Color.orange()
+                                )
+                                await message.channel.send(content=message.author.mention, embed=timeout_embed)
+                                return
+
+                            stats = analysis.stats
+                            await handle_scan_results(message, filename, file_size, stats, status_message, temp_path)
+
+                    except TimeoutError:
+                        logging.warning(f"Analysis timed out for file: {filename}")
+                    except Exception as e:
+                        error_msg = f"파일 `{filename}` 검사 중 오류가 발생했습니다: {str(e)}"
+                        logging.exception(f"Exception occurred: {str(e)}")
+                        await message.channel.send(error_msg)
+
+                else:
+                    logging.debug(f"Unsupported file type received: {filename}")
+                    await message.channel.send(f"파일 `{filename}`은(는) 지원되지 않는 파일 형식입니다.")
+
+                pass
 
     await bot.process_commands(message)
+
+@bot.event
+async def on_ready():
+    try:
+        synced = await bot.tree.sync()
+        logging.info(f"Synced {len(synced)} command(s)")
+    except Exception as e:
+        logging.error(f"Failed to sync commands: {e}")
+    logging.info(f"Logged in as {bot.user}!")
 
 bot.run(DISCORD_TOKEN)
