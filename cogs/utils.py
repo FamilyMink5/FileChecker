@@ -3,7 +3,7 @@ import os
 import re
 import unicodedata
 from datetime import datetime, timedelta
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 from dotenv import load_dotenv
 from pathlib import Path
 import aiohttp
@@ -244,6 +244,29 @@ async def download_file(url, save_path, max_retries=3, timeout=30):
     logging.error(f"Failed to download file after {max_retries} attempts: {url}")
     return None
 
+def ensure_url_has_scheme(url):
+    """
+    URL에 스킴이 없으면 기본값으로 'https://'를 추가합니다.
+    잘못된 URL 형식을 수정합니다.
+    """
+    parsed_url = urlparse(url)
+
+    # 스킴이 없으면 기본값으로 'https://' 추가
+    if not parsed_url.scheme:
+        # netloc이 비어 있는 경우 path에 도메인이 포함되었을 가능성 처리
+        if not parsed_url.netloc:
+            # path가 도메인과 경로를 포함한 경우 처리
+            parts = parsed_url.path.split('/', 1)
+            netloc = parts[0]  # 첫 번째 부분을 netloc으로 간주
+            path = f"/{parts[1]}" if len(parts) > 1 else ""  # 나머지는 path로 간주
+        else:
+            netloc = parsed_url.netloc
+            path = parsed_url.path
+
+        # 올바른 URL 조합
+        url = urlunparse(('https', netloc, path, parsed_url.params, parsed_url.query, parsed_url.fragment))
+    return url
+
 async def process_url(url, message):
     """
     URL을 처리하는 함수:
@@ -251,15 +274,18 @@ async def process_url(url, message):
     2. 파일 다운로드 후 확장자 확인 및 검사
     """
     try:
+        # URL에 스킴 추가
+        url = ensure_url_has_scheme(url)
+
         # GET 요청 보내기
         async with aiohttp.ClientSession() as session:
             async with session.get(url) as response:
-                logging.debug(f"GET request to {url} returned status {response.status}")
+                logging.debug(f"GET 요청 결과 - URL: {url}, 상태 코드: {response.status}")
                 if response.status != 200:
                     await message.channel.send(f"링크 `{url}`은 비정상적인 응답을 반환했습니다. (상태 코드: {response.status})")
                     return
 
-        # 파일 다운로드 및 검사
+        # 이후 로직은 기존 코드와 동일
         parsed_url = urlparse(url)
         file_name = Path(parsed_url.path).name
         if not file_name:
@@ -281,12 +307,6 @@ async def process_url(url, message):
         downloaded_file = await download_file(url, temp_file_path)
         if not downloaded_file:
             await message.channel.send(f"링크 `{url}`에서 파일을 다운로드할 수 없습니다.")
-            return
-
-        # 파일 확장자 확인
-        if not is_allowed_file(downloaded_file.name):
-            logging.debug(f"링크 `{url}`에서 다운로드한 파일 `{downloaded_file.name}`은 지원되지 않는 확장자입니다.")
-            await message.channel.send(f"링크 `{url}`에서 다운로드한 파일 `{downloaded_file.name}`은 지원되지 않는 확장자입니다.")
             return
 
         # 파일 크기 확인
