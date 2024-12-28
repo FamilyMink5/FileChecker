@@ -38,6 +38,19 @@ async def load_cogs():
 @bot.event
 async def on_ready():
     logging.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
+    
+    # 등록된 명령어 확인
+    logging.info("Registered commands:")
+    for command in bot.tree.get_commands():
+        logging.info(f"- {command.name}")
+    
+    # 전역 슬래시 명령어 동기화
+    try:
+        synced = await bot.tree.sync()
+        logging.info(f"Synced {len(synced)} command(s)")
+    except Exception as e:
+        logging.error(f"Failed to sync commands: {e}")
+    
     logging.info("Bot is ready!")
 
 # 봇 실행
