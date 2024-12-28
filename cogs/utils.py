@@ -330,7 +330,7 @@ async def process_url(url, message):
             # 검사 결과 처리
             if analysis.status == "completed":
                 stats = analysis.stats
-                await handle_scan_results(message, downloaded_file.name, file_size, stats, status_message, downloaded_file)
+                await handle_link_scan_results(message, downloaded_file.name, file_size, stats, status_message, url)
             else:
                 await message.channel.send(f"링크에서 다운로드한 파일 `{downloaded_file.name}`의 검사 시간이 초과되었습니다.")
 
@@ -556,6 +556,64 @@ async def handle_scan_results(message, filename, file_size, stats, status_messag
                 discord_file = discord.File(fp=file_path)
                 await message.channel.send(file=discord_file)
                 logging.debug("Safe file sent as a separate message.")
+
+    except Exception as e:
+        logging.exception(f"Error while handling scan results: {e}")
+        await message.channel.send(f"파일 `{filename}` 처리 중 오류가 발생했습니다: {str(e)}")
+
+async def handle_link_scan_results(message, filename, file_size, stats, status_message, link):
+    """
+    파일 검사 결과를 처리하고 사용자에게 응답을 전송하는 함수
+    """
+    # 분석 결과에서 stats 추출
+    malicious_count = stats.get("malicious", 0)
+    suspicious_count = stats.get("suspicious", 0)
+    harmless_count = stats.get("harmless", 0)
+    undetected_count = stats.get("undetected", 0)
+    timeout_count = stats.get("timeout", 0)
+    confirmed_timeout_count = stats.get("confirmed-timeout", 0)
+    failure_count = stats.get("failure", 0)
+    type_unsurported_count = stats.get("type-unsupported", 0)
+    total_count = sum(stats.values())
+
+    # 결과 임베드 생성
+    result_embed = discord.Embed(
+        title="링크 검사 결과",
+        color=discord.Color.red() if malicious_count + suspicious_count > 0 else discord.Color.green()
+    )
+    result_embed.add_field(name="파일 이름", value=filename, inline=False)
+    result_embed.add_field(name="파일 사이즈", value=f"{file_size / (1024 * 1024):.2f}MB", inline=False)
+    result_embed.add_field(name="보낸 유저", value=message.author.mention, inline=False)
+    result_embed.add_field(name="총 검사 엔진 수", value=str(total_count), inline=False)
+    result_embed.add_field(name="✅ 안전 판정 엔진 수", value=str(undetected_count + harmless_count), inline=False)
+    result_embed.add_field(name="‼️ 유해 판정 엔진 수", value=str(malicious_count), inline=False)
+
+    try:
+        if malicious_count + suspicious_count > 0:
+            result_embed.description = f"⚠️ 이 링크는 잠재적으로 위험할 수 있습니다!"
+            # 관리자 맨션
+            try:
+                admin_user = await bot.fetch_user(ADMIN_USER_ID)
+            except AttributeError as e:
+                logging.error(f"Error fetching admin user: {e}")
+                admin_user = None  # Fallback: handle gracefully
+
+            if admin_user is None:
+                content = f"{message.author.mention} (Admin user could not be fetched)"
+            else:
+                content = f"{message.author.mention} {admin_user.mention}"
+
+            await send_detailed_message_via_webhook(message, filename, file_size, stats)
+            await status_message.reply(content=content, embed=result_embed)
+            logging.debug("Scan result sent with admin mention.")
+        else:
+            result_embed.description = f"✅ 이 링크는 안전한 것으로 보입니다."
+            await send_detailed_message_via_webhook(message, filename, file_size, stats)
+            await status_message.reply(content=message.author.mention, embed=result_embed)
+
+            # 안전한 링크면 Discord 파일로 별도 전송
+            await message.channel.send(content=f"{link}")
+            logging.debug("Safe file sent as a separate message.")
 
     except Exception as e:
         logging.exception(f"Error while handling scan results: {e}")
