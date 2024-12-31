@@ -144,7 +144,7 @@ def save_server_settings():
     try:
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
             # 서버별 설정을 딕셔너리로 변환
-            data = {
+            data = {    
                 str(guild_id): vars(settings)  # 객체를 딕셔너리로 변환
                 for guild_id, settings in server_settings.items()
             }
@@ -155,6 +155,7 @@ def save_server_settings():
 
 # 서버별 설정을 로드하거나 기본값 생성
 def get_server_settings(guild_id):
+    global server_settings
     if guild_id not in server_settings:
         server_settings[guild_id] = BotSettings()  # 새로 생성
     return server_settings[guild_id]
@@ -424,7 +425,7 @@ def ensure_url_has_scheme(url):
         url = urlunparse(('https', netloc, path, parsed_url.params, parsed_url.query, parsed_url.fragment))
     return url
 
-async def process_url(url, message):
+async def process_url(self, url, message):
     """
     URL을 처리하는 함수
     """
@@ -494,7 +495,7 @@ async def process_url(url, message):
             # 검사 결과 처리
             if analysis.status == "completed":
                 stats = analysis.stats
-                await handle_link_scan_results(message, downloaded_file.name, file_size, stats, status_message, url)
+                await handle_link_scan_results(self, message, downloaded_file.name, file_size, stats, status_message, url)
             else:
                 error_embed = await create_error_embed(
                     title="검사 시간 초과",
@@ -643,7 +644,7 @@ async def check_url_safety(url):
 
     return "safe"
 
-async def send_detailed_message_via_webhook(message, filename, file_size, stats):
+async def send_detailed_message_via_webhook(self, message, filename, file_size, stats):
     """
     Webhook을 통해 자세한 메시지를 전송합니다.
     """
@@ -672,13 +673,34 @@ async def send_detailed_message_via_webhook(message, filename, file_size, stats)
     embed.add_field(name="⏰ 타임아웃 엔진 수", value=str(timeout_count + confirmed_timeout_count), inline=False)
     embed.add_field(name="❔ 판정 실패 엔진 수", value=str(failure_count), inline=False)
     embed.add_field(name="❌ 형식 미지원 엔진 수", value=str(type_unsurported_count), inline=False)
+    content = ""
+    if malicious_count + suspicious_count > 0:
+        embed.description = f"⚠️ 이 파일은 잠재적으로 위험할 수 있습니다!"
+        # 관리자 맨션
+        try:
+            admin_user = await self.bot.fetch_user(ADMIN_USER_ID)
+        except AttributeError as e:
+            logging.error(f"Error fetching admin user: {e}")
+            admin_user = None  # Fallback: handle gracefully
+        if admin_user is None:
+            content += f"{message.author.mention} (Admin user could not be fetched)"
+        else:
+            content += f"{message.author.mention} {admin_user.mention}"
+
+        # embed.content(content=content)
+
+        logging.debug("Scan result sent with admin mention.")
+    else:
+        embed.description = f"✅ 이 파일은 안전한 것으로 보입니다."
 
     if not WEBHOOK_URL:
         logging.error("WEBHOOK_URL is not set in the environment variables.")
         return
 
-    # Webhook에 보낼 페이로드 준비
+    # Webhook에 
+        
     payload = {
+        "content" : content,
         "embeds": [embed.to_dict()],
         "username": "FileChecker",  # 선택 사항: Webhook의 사용자명 설정
         "avatar_url": "https://www.familymink5.kr/assets/img/serverinfo.webp"  # 선택 사항: Webhook의 아바타 설정
@@ -695,7 +717,7 @@ async def send_detailed_message_via_webhook(message, filename, file_size, stats)
         except Exception as e:
             logging.exception(f"Error sending message via webhook: {e}")
 
-async def handle_scan_results(message, filename, file_size, stats, status_message, file_path):
+async def handle_scan_results(self, message, filename, file_size, stats, status_message, file_path):
     """
     파일 검사 결과를 처리하고 사용자에게 응답을 전송하는 함수
     """
@@ -727,7 +749,7 @@ async def handle_scan_results(message, filename, file_size, stats, status_messag
             result_embed.description = f"⚠️ 이 파일은 잠재적으로 위험할 수 있습니다!"
             # 관리자 맨션
             try:
-                admin_user = await bot.fetch_user(ADMIN_USER_ID)
+                admin_user = await self.bot.fetch_user(ADMIN_USER_ID)
             except AttributeError as e:
                 logging.error(f"Error fetching admin user: {e}")
                 admin_user = None  # Fallback: handle gracefully
@@ -737,12 +759,12 @@ async def handle_scan_results(message, filename, file_size, stats, status_messag
             else:
                 content = f"{message.author.mention} {admin_user.mention}"
 
-            await send_detailed_message_via_webhook(message, filename, file_size, stats)
+            await send_detailed_message_via_webhook(self, message, filename, file_size, stats)
             await status_message.reply(content=content, embed=result_embed)
             logging.debug("Scan result sent with admin mention.")
         else:
             result_embed.description = f"✅ 이 파일은 안전한 것으로 보입니다."
-            await send_detailed_message_via_webhook(message, filename, file_size, stats)
+            await send_detailed_message_via_webhook(self, message, filename, file_size, stats)
             await status_message.reply(content=message.author.mention, embed=result_embed)
 
             # 파일 크기가 Discord 업로드 제한을 초과하는지 확인
@@ -762,7 +784,7 @@ async def handle_scan_results(message, filename, file_size, stats, status_messag
         logging.exception(f"Error while handling scan results: {e}")
         await message.channel.send(f"파일 `{filename}` 처리 중 오류가 발생했습니다: {str(e)}")
 
-async def handle_link_scan_results(message, filename, file_size, stats, status_message, link):
+async def handle_link_scan_results(self, message, filename, file_size, stats, status_message, link):
     """
     파일 검사 결과를 처리하고 사용자에게 응답을 전송하는 함수
     """
@@ -794,7 +816,7 @@ async def handle_link_scan_results(message, filename, file_size, stats, status_m
             result_embed.description = f"⚠️ 이 링크는 잠재적으로 위험할 수 있습니다!"
             # 관리자 맨션
             try:
-                admin_user = await bot.fetch_user(ADMIN_USER_ID)
+                admin_user = await self.bot.fetch_user(ADMIN_USER_ID)
             except AttributeError as e:
                 logging.error(f"Error fetching admin user: {e}")
                 admin_user = None  # Fallback: handle gracefully
@@ -814,7 +836,7 @@ async def handle_link_scan_results(message, filename, file_size, stats, status_m
 
             # 안전한 링크면 Discord 파일로 별도 전송
             await message.channel.send(content=f"{link}")
-            logging.debug("Safe file sent as a separate message.")
+            logging.debug("Safe link sent as a separate message.")
 
     except Exception as e:
         logging.exception(f"Error while handling scan results: {e}")

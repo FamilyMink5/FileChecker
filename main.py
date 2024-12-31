@@ -20,36 +20,37 @@ load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 
 # 봇 초기화
-intents = discord.Intents.default()
-intents.messages = True
-intents.message_content = True
-intents.guilds = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.AutoShardedBot(
+    command_prefix=commands.when_mentioned_or("!"),
+    help_command=None,
+    intents=discord.Intents.all(),
+    owner_ids=[875214750714314793],
+)
 
 # Cogs 로드
 async def load_cogs():
     for filename in os.listdir("./cogs"):
         # __init__.py와 utils.py를 제외하고 로드
         if filename.endswith(".py") and filename not in ["__init__.py", "utils.py"]:
-            await bot.load_extension(f"cogs.{filename[:-3]}")  # 파일 확장자 제거
+            bot.load_extension(f"cogs.{filename[:-3]}")  # 파일 확장자 제거
             logging.info(f"✅ Loaded Cog: {filename}")
 
 @bot.event
 async def on_ready():
     logging.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
     
-    # 등록된 명령어 확인
-    logging.info("Registered commands:")
-    for command in bot.tree.get_commands():
-        logging.info(f"- {command.name}")
+    # # 등록된 명령어 확인
+    # logging.info("Registered commands:")
+    # for command in bot.tree.get_commands():
+    #     logging.info(f"- {command.name}")
     
-    # 전역 슬래시 명령어 동기화
-    try:
-        synced = await bot.tree.sync()
-        logging.info(f"Synced {len(synced)} command(s)")
-    except Exception as e:
-        logging.error(f"Failed to sync commands: {e}")
+    # # 전역 슬래시 명령어 동기화
+    # try:
+    #     synced = await bot.tree.sync()
+    #     logging.info(f"Synced {len(synced)} command(s)")
+    # except Exception as e:
+    #     logging.error(f"Failed to sync commands: {e}")
     
     logging.info("Bot is ready!")
 

@@ -11,7 +11,6 @@ class EventCog(commands.Cog):
         self.bot = bot
 
     @commands.Cog.listener()
-    @commands.Cog.listener()
     async def on_message(self, message):
         if message.author.bot:
             return
@@ -29,7 +28,7 @@ class EventCog(commands.Cog):
                     await message.channel.send(f"{message.author.mention}, 해당 링크는 안전하지 않으므로 삭제되었습니다.")
                 elif safety == "safe":
                     await message.add_reaction("✅")
-                    await process_url(url, message)
+                    await process_url(self, url, message)
                 else:
                     await message.add_reaction("❓")
 
@@ -85,7 +84,7 @@ class EventCog(commands.Cog):
                                 return
 
                             stats = analysis.stats
-                            await handle_scan_results(message, filename, file_size, stats, status_message, temp_path)
+                            await handle_scan_results(self, message, filename, file_size, stats, status_message, temp_path)
 
                     except TimeoutError:
                         logging.warning(f"Analysis timed out for file: {filename}")
@@ -103,5 +102,6 @@ class EventCog(commands.Cog):
         if bot.user is not None:
             await bot.process_commands(message)  # bot.user가 None이 아닐 때만 호출
 
-async def setup(bot):
-    await bot.add_cog(EventCog(bot))
+def setup(bot):
+    bot.add_cog(EventCog(bot))
+    
