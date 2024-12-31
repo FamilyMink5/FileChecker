@@ -77,6 +77,40 @@ class BotSettings:
 
 settings = BotSettings()
 
+async def create_error_embed(title, description, url=None, status_code=None):
+    """
+    Creates a standardized error embed for the bot
+    """
+    error_embed = discord.Embed(
+        title=title,
+        description=description,
+        color=discord.Color.red()
+    )
+    if url:
+        error_embed.add_field(name="링크", value=url, inline=False)
+    if status_code:
+        error_embed.add_field(name="상태 코드", value=status_code, inline=False)
+    return error_embed
+
+async def send_error_message(message, embed, admin_mention=True):
+    """
+    Sends an error message with optional admin mention
+    """
+    try:
+        if admin_mention:
+            try:
+                admin_user = await bot.fetch_user(ADMIN_USER_ID)
+                content = f"{message.author.mention} {admin_user.mention}"
+            except:
+                content = f"{message.author.mention} (Admin user could not be fetched)"
+        else:
+            content = message.author.mention
+            
+        await message.reply(content=content, embed=embed)
+        logging.debug("Error message sent successfully")
+    except Exception as e:
+        logging.error(f"Failed to send error message: {e}")
+
 # 관리자 권한 확인 함수
 def is_admin(interaction: discord.Interaction) -> bool:
     return interaction.user.id == ADMIN_USER_ID
@@ -182,66 +216,189 @@ def extract_urls(text):
     logging.debug(f"Extracted URLs: {urls}")
     return urls
 
-# 기존 다운로드 함수 수정
-async def download_file(url, save_path, max_retries=3, timeout=30):
+async def create_download_error_embed(title, description, url=None, filename=None, error=None, size=None):
+    """
+    Creates a standardized download error embed
+    """
+    error_embed = discord.Embed(
+        title=title,
+        description=description,
+        color=discord.Color.red()
+    )
+    if url:
+        error_embed.add_field(name="다운로드 URL", value=url, inline=False)
+    if filename:
+        error_embed.add_field(name="파일명", value=filename, inline=False)
+    if size:
+        error_embed.add_field(name="파일 크기", value=f"{size / (1024*1024):.2f}MB", inline=False)
+    if error:
+        error_embed.add_field(name="오류 내용", value=str(error), inline=False)
+    return error_embed
+
+async def download_file(url, save_path, message, max_retries=3, base_timeout=30):
+    """
+    Downloads a file with improved error handling and progress tracking
+    
+    Args:
+        url (str): URL to download from
+        save_path (Path): Path to save the file to
+        message (discord.Message): Original message for error reporting
+        max_retries (int): Maximum number of retry attempts
+        base_timeout (int): Base timeout in seconds
+        
+    Returns:
+        Path: Path to the downloaded file or None if download failed
+    """
     if settings.network_limit:
-        chunk_size = int((settings.network_limit * 1024 * 1024) / 8)  # Mbps를 bytes/s로 변환
+        chunk_size = int((settings.network_limit * 1024 * 1024) / 8)
     else:
-        chunk_size = 8192  # 기본 청크 크기
+        chunk_size = 8192
 
     attempt = 0
+    filename = save_path.name
+    
     while attempt < max_retries:
         try:
-            logging.debug(f"Attempting to download file (Attempt {attempt + 1}/{max_retries}): {url}")
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
+            current_timeout = base_timeout * (attempt + 1)
+            logging.debug(f"Attempting download (Attempt {attempt + 1}/{max_retries}): {url}")
+            
+            timeout = aiohttp.ClientTimeout(
+                total=current_timeout * 2,
+                connect=current_timeout,
+                sock_read=current_timeout
+            )
+
+            async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(url) as response:
-                    logging.debug(f"Received response with status code: {response.status}")
-                    
-                    if response.status == 200:
-                        filename = save_path.name
-                        if 'Content-Disposition' in response.headers:
-                            cd = response.headers.get('Content-Disposition')
-                            fname_match = re.findall('filename="?([^\'";]+)"?', cd)
-                            if fname_match:
-                                filename = fname_match[0]
-                                filename = sanitize_filename(filename)
-                        
-                        if not settings.save_temp:
-                            # 임시 파일 생성
-                            temp_file = Path(os.path.join(os.getcwd(), "temp_download"))
-                            save_path = temp_file
-                        else:
-                            guild_name = sanitize_filename(save_path.parent.parent.stem)
-                            channel_name = sanitize_filename(save_path.parent.stem)
-                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
-                            temp_dir = TEMP_DIR / guild_name / channel_name / timestamp
-                            temp_dir.mkdir(parents=True, exist_ok=True)
-                            save_path = temp_dir / filename
+                    if response.status != 200:
+                        error_embed = await create_download_error_embed(
+                            title="다운로드 실패",
+                            description=f"❌ HTTP 상태 코드 {response.status}로 다운로드에 실패했습니다.",
+                            url=url,
+                            filename=filename
+                        )
+                        await send_error_message(message, error_embed)
+                        attempt += 1
+                        if attempt < max_retries:
+                            await asyncio.sleep(2 ** attempt)
+                        continue
 
-                        if not is_allowed_file(filename):
-                            logging.debug(f"Downloaded file '{filename}' is not an allowed type.")
-                            return None
-
-                        # 청크 단위로 파일 다운로드
-                        with save_path.open('wb') as f:
-                            async for chunk in response.content.iter_chunked(chunk_size):
-                                f.write(chunk)
-                                if settings.network_limit:  # None이면 대역폭 제한 없음
-                                    await asyncio.sleep(len(chunk) / (chunk_size))
-
-                        logging.debug(f"File downloaded successfully: {save_path}")
-                        return save_path
-                    else:
-                        logging.error(f"Failed to download file: Status code {response.status}")
+                    total_size = int(response.headers.get('content-length', 0))
+                    if total_size > DISCORD_FILE_SIZE_LIMIT:
+                        error_embed = await create_download_error_embed(
+                            title="파일 크기 초과",
+                            description="❌ 파일이 Discord 업로드 제한(8MB)을 초과합니다.",
+                            url=url,
+                            filename=filename,
+                            size=total_size
+                        )
+                        await send_error_message(message, error_embed)
                         return None
 
-        except Exception as e:
-            logging.exception(f"Error downloading file: {e}")
-            attempt += 1
-            if attempt < max_retries:
-                await asyncio.sleep(2)
+                    if 'Content-Disposition' in response.headers:
+                        cd = response.headers.get('Content-Disposition')
+                        fname_match = re.findall('filename="?([^\'";]+)"?', cd)
+                        if fname_match:
+                            filename = sanitize_filename(fname_match[0])
+                    
+                    # 저장 경로 설정
+                    if not settings.save_temp:
+                        save_path = Path(os.path.join(os.getcwd(), "temp_download"))
+                    else:
+                        guild_name = sanitize_filename(save_path.parent.parent.stem)
+                        channel_name = sanitize_filename(save_path.parent.stem)
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+                        temp_dir = TEMP_DIR / guild_name / channel_name / timestamp
+                        temp_dir.mkdir(parents=True, exist_ok=True)
+                        save_path = temp_dir / filename
 
-    logging.error(f"Failed to download file after {max_retries} attempts: {url}")
+                    if not is_allowed_file(filename):
+                        error_embed = await create_download_error_embed(
+                            title="지원하지 않는 파일 형식",
+                            description="❌ 이 파일 형식은 지원되지 않습니다.",
+                            url=url,
+                            filename=filename
+                        )
+                        await send_error_message(message, error_embed)
+                        return None
+
+                    # 다운로드 진행
+                    downloaded_size = 0
+                    last_progress_log = 0
+                    
+                    with save_path.open('wb') as f:
+                        async for chunk in response.content.iter_chunked(chunk_size):
+                            try:
+                                f.write(chunk)
+                                downloaded_size += len(chunk)
+
+                                if total_size > 0:
+                                    progress = (downloaded_size / total_size) * 100
+                                    if progress - last_progress_log >= 10:
+                                        logging.debug(f"Download progress: {progress:.1f}%")
+                                        last_progress_log = progress
+
+                                if settings.network_limit:
+                                    await asyncio.sleep(len(chunk) / (chunk_size))
+
+                            except asyncio.TimeoutError:
+                                error_embed = await create_download_error_embed(
+                                    title="다운로드 시간 초과",
+                                    description=f"⏰ 청크 다운로드 중 시간 초과 ({current_timeout}초)",
+                                    url=url,
+                                    filename=filename,
+                                    size=downloaded_size
+                                )
+                                await send_error_message(message, error_embed)
+                                raise
+
+                    logging.debug(f"Download completed: {save_path}")
+                    return save_path
+
+        except asyncio.TimeoutError as e:
+            error_embed = await create_download_error_embed(
+                title="다운로드 시간 초과",
+                description=f"⏰ 다운로드 시도 {attempt + 1} 실패",
+                url=url,
+                filename=filename,
+                error=str(e)
+            )
+            await send_error_message(message, error_embed)
+            attempt += 1
+
+        except aiohttp.ClientError as e:
+            error_embed = await create_download_error_embed(
+                title="네트워크 오류",
+                description=f"🌐 다운로드 시도 {attempt + 1} 실패",
+                url=url,
+                filename=filename,
+                error=str(e)
+            )
+            await send_error_message(message, error_embed)
+            attempt += 1
+
+        except Exception as e:
+            error_embed = await create_download_error_embed(
+                title="예기치 않은 오류",
+                description="❌ 파일 다운로드 중 오류가 발생했습니다.",
+                url=url,
+                filename=filename,
+                error=str(e)
+            )
+            await send_error_message(message, error_embed)
+            logging.exception(f"Unexpected error during download: {e}")
+            return None
+
+        if attempt < max_retries:
+            await asyncio.sleep(2 ** attempt)
+        
+    error_embed = await create_download_error_embed(
+        title="다운로드 실패",
+        description=f"❌ {max_retries}회 시도 후 다운로드에 실패했습니다.",
+        url=url,
+        filename=filename
+    )
+    await send_error_message(message, error_embed)
     return None
 
 def ensure_url_has_scheme(url):
@@ -269,44 +426,51 @@ def ensure_url_has_scheme(url):
 
 async def process_url(url, message):
     """
-    URL을 처리하는 함수:
-    1. GET 요청을 보내 응답 상태를 확인
-    2. 파일 다운로드 후 확장자 확인 및 검사
+    URL을 처리하는 함수
     """
     try:
-        # URL에 스킴 추가
         url = ensure_url_has_scheme(url)
-
-        # GET 요청 보내기
+        
         async with aiohttp.ClientSession() as session:
             async with session.get(url) as response:
                 logging.debug(f"GET 요청 결과 - URL: {url}, 상태 코드: {response.status}")
                 if response.status != 200:
-                    await message.channel.send(f"링크 `{url}`은 비정상적인 응답을 반환했습니다. (상태 코드: {response.status})")
+                    error_embed = await create_error_embed(
+                        title="GET 요청 실패 오류",
+                        description="❗ GET 요청에 실패했습니다.\n해당 링크가 유효한지 확인하십시오.",
+                        url=url,
+                        status_code=response.status
+                    )
+                    await send_error_message(message, error_embed)
                     return
 
-        # 이후 로직은 기존 코드와 동일
         parsed_url = urlparse(url)
         file_name = Path(parsed_url.path).name
         if not file_name:
-            logging.debug(f"URL `{url}`에서 파일 이름을 추출할 수 없습니다.")
-            await message.channel.send(f"링크 `{url}`에서 파일 이름을 추출할 수 없습니다.")
+            error_embed = await create_error_embed(
+                title="링크 추출 오류",
+                description="❗ 링크 추출에 실패했습니다.\n해당 메시지에 링크가 있는지 확인하십시오.",
+                url=url
+            )
+            error_embed.add_field(name="추출된 링크", value=parsed_url, inline=False)
+            await send_error_message(message, error_embed)
             return
 
+        # 파일 이름 정리
         sanitized_file_name = sanitize_filename(file_name)
 
         # 파일 저장 경로 생성
         guild_name = sanitize_filename(message.guild.name if message.guild else "DM")
         channel_name = sanitize_filename(message.channel.name if isinstance(message.channel, discord.TextChannel) else "DM")
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # ms 포함된 시간
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
         save_path = TEMP_DIR / guild_name / channel_name / timestamp
         save_path.mkdir(parents=True, exist_ok=True)
 
         temp_file_path = save_path / sanitized_file_name
 
-        downloaded_file = await download_file(url, temp_file_path)
+        # 파일 다운로드
+        downloaded_file = await download_file(url, temp_file_path, message)
         if not downloaded_file:
-            await message.channel.send(f"링크 `{url}`에서 파일을 다운로드할 수 없습니다.")
             return
 
         # 파일 크기 확인
@@ -332,11 +496,20 @@ async def process_url(url, message):
                 stats = analysis.stats
                 await handle_link_scan_results(message, downloaded_file.name, file_size, stats, status_message, url)
             else:
-                await message.channel.send(f"링크에서 다운로드한 파일 `{downloaded_file.name}`의 검사 시간이 초과되었습니다.")
+                error_embed = await create_error_embed(
+                    title="검사 시간 초과",
+                    description=f"⏰ 파일 `{downloaded_file.name}`의 검사 시간이 초과되었습니다.",
+                )
+                await send_error_message(message, error_embed)
 
     except Exception as e:
+        error_embed = await create_error_embed(
+            title="URL 처리 오류",
+            description=f"❗ 링크 처리 중 오류가 발생했습니다: {str(e)}",
+            url=url
+        )
+        await send_error_message(message, error_embed)
         logging.exception(f"URL `{url}` 처리 중 오류 발생: {e}")
-        await message.channel.send(f"링크 `{url}` 처리 중 오류가 발생했습니다: {str(e)}")
 
 async def scan_file_with_vt(client, file_path, embed, status_message, message, file_size):
     """
@@ -384,63 +557,91 @@ async def scan_file_with_vt(client, file_path, embed, status_message, message, f
                 await asyncio.sleep(5)
 
         if attempt >= max_attempts:
-            # 분석 시간이 초과된 경우
-            logging.warning(f"Analysis timed out for file: {file_path}")
-            embed.description = f"⏰ 파일 `{file_path.name}`의 분석 시간이 초과되었습니다.\n보낸 유저: {message.author.mention}\n파일 사이즈: {file_size / (1024 * 1024):.2f}MB"
-            await status_message.edit(embed=embed)
+            error_embed = await create_error_embed(
+                title="스캔 시간 초과",
+                description=f"⏰ 파일 `{file_path.name}`의 분석 시간이 초과되었습니다.",
+            )
+            error_embed.add_field(name="파일 크기", value=f"{file_size / (1024 * 1024):.2f}MB", inline=False)
+            error_embed.add_field(name="보낸 유저", value=message.author.mention, inline=False)
+            await send_error_message(message, error_embed, admin_mention=True)
             raise TimeoutError("Analysis timed out.")
 
-        logging.debug(f"Returning analysis result: {analysis.id}")
         return analysis
 
     except Exception as e:
+        error_embed = await create_error_embed(
+            title="스캔 오류",
+            description=f"❗ 파일 스캔 중 오류가 발생했습니다: {str(e)}",
+        )
+        await send_error_message(message, error_embed, admin_mention=True)
         logging.exception(f"Detailed error during VT scan: {e}")
         raise
 
+async def check_url_with_virustotal(url):
+    """
+    VirusTotal API를 사용하여 URL의 안전성을 검사합니다.
+    """
+    try:
+        api_key = await get_available_api_key()
+        async with vt.Client(api_key) as client:
+            analysis = await client.scan_url_async(url)
+            logging.debug(f"VirusTotal analysis ID: {analysis.id}")
+
+            # 결과를 확인 (최대 시도 횟수: 30)
+            max_attempts = 30
+            attempt = 0
+            while attempt < max_attempts:
+                analysis = await client.get_object_async(f"/analyses/{analysis.id}")
+                if analysis.status == "completed":
+                    return analysis.stats  # 통계 데이터 반환
+                attempt += 1
+                await asyncio.sleep(10)  # 10초 대기
+
+            raise TimeoutError("VirusTotal URL analysis timed out.")
+
+    except Exception as e:
+        logging.exception(f"VirusTotal URL 검사 오류: {e}")
+        return None
+
+
 async def check_url_safety(url):
     """
-    Google Safe Browsing API를 사용하여 URL의 안전성을 검사합니다.
+    Google Safe Browsing 및 VirusTotal API를 사용하여 URL의 안전성을 검사합니다.
     """
+    # Google Safe Browsing 검사
     api_url = "https://safebrowsing.googleapis.com/v4/threatMatches:find"
-    headers = {
-        "Content-Type": "application/json"
-    }
+    headers = {"Content-Type": "application/json"}
     payload = {
-        "client": {
-            "clientId": "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; Googlebot/2.1; +http://www.google.com/bot.html) Chrome/131.0.0.0 Safari/537.36",
-            "clientVersion": "131.0.0.0"
-        },
+        "client": {"clientId": "your_client_id", "clientVersion": "1.0"},
         "threatInfo": {
             "threatTypes": ["MALWARE", "SOCIAL_ENGINEERING", "UNWANTED_SOFTWARE"],
             "platformTypes": ["ANY_PLATFORM"],
             "threatEntryTypes": ["URL"],
-            "threatEntries": [
-                {"url": url}
-            ]
+            "threatEntries": [{"url": url}]
         }
     }
 
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(api_url, json=payload, headers=headers, params={"key": SAFE_BROWSING_API_KEY}) as response:
-                response_text = await response.text()
-                logging.debug(f"Google Safe Browsing API response status: {response.status}")
-                logging.debug(f"Google Safe Browsing API response body: {response_text}")
-
-                if response.status != 200:
-                    logging.error(f"Google Safe Browsing API request failed with status {response.status}")
-                    return "unknown"
-
-                data = await response.json()
-                if "matches" in data:
-                    logging.debug(f"URL detected as malicious: {url}")
-                    return "malicious"
-                else:
-                    logging.debug(f"URL is safe: {url}")
-                    return "safe"
+                if response.status == 200:
+                    data = await response.json()
+                    if "matches" in data:
+                        logging.debug(f"Google Safe Browsing: URL `{url}` is malicious.")
+                        return "malicious"
     except Exception as e:
-        logging.exception(f"Error during Google Safe Browsing API request: {e}")
-        return "unknown"
+        logging.exception(f"Google Safe Browsing 검사 오류: {e}")
+
+    # VirusTotal 검사
+    vt_stats = await check_url_with_virustotal(url)
+    if vt_stats:
+        malicious = vt_stats.get("malicious", 0)
+        suspicious = vt_stats.get("suspicious", 0)
+        if malicious > 0 or suspicious > 0:
+            logging.debug(f"VirusTotal: URL `{url}` is malicious or suspicious.")
+            return "malicious"
+
+    return "safe"
 
 async def send_detailed_message_via_webhook(message, filename, file_size, stats):
     """

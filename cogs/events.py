@@ -11,27 +11,27 @@ class EventCog(commands.Cog):
         self.bot = bot
 
     @commands.Cog.listener()
+    @commands.Cog.listener()
     async def on_message(self, message):
         if message.author.bot:
             return
 
-        # 메시지에서 링크를 추출
+        # 메시지에서 링크 추출
         urls = extract_urls(message.content)
 
-        # 링크 검사가 활성화된 경우에만 수행
-        if settings.link_check:
-            if urls:
-                for url in urls:
-                    safety = await check_url_safety(url)
-                    if safety == "malicious":
-                        await message.add_reaction("❗️")
-                        await message.delete()
-                        await message.channel.send(f"링크 `{url}`은 안전하지 않으므로 삭제되었습니다.")
-                    elif safety == "safe":
-                        await message.add_reaction("✅")
-                        await process_url(url, message)
-                    else:
-                        await message.add_reaction("❓")
+        if settings.link_check and urls:
+            for url in urls:
+                safety = await check_url_safety(url)
+                if safety == "malicious":
+                    # 이모지 수정: "❗️" → "❗"
+                    await message.add_reaction("❗")
+                    await message.delete()
+                    await message.channel.send(f"{message.author.mention}, 해당 링크는 안전하지 않으므로 삭제되었습니다.")
+                elif safety == "safe":
+                    await message.add_reaction("✅")
+                    await process_url(url, message)
+                else:
+                    await message.add_reaction("❓")
 
         if settings.file_check and message.attachments:
             # 첨부 파일 처리
